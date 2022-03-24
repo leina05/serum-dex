@@ -112,6 +112,8 @@ pub enum DexErrorCode {
     WouldSelfTrade,
     InvalidOpenOrdersAuthority,
 
+    VolumeTrackingUnsupported = 80,
+
     Unknown = 1000,
 
     // This contains the line number in the lower 16 bits,

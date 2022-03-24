@@ -165,7 +165,7 @@ pub struct VolumeTracker {
     period_start_ts: u64,
     /// The total volume over the trailing `EPOCH_LEN` periods, as of `period_start_ts`
     total_trailing_volume: u64,
-    /// The mint address of the token that volume is denominated in
+    /// The mint address of the token that volume is denominated in. For now, should always be set to USDC.
     mint: Pubkey,
 }
 

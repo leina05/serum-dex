@@ -23,7 +23,7 @@ use spl_token::error::TokenError;
 
 use crate::{
     critbit::Slab,
-    error::{DexErrorCode, DexResult, SourceFileId},
+    error::{DexError, DexErrorCode, DexResult, SourceFileId},
     fees::{self, FeeTier},
     instruction::{
         disable_authority, fee_sweeper, msrm_token, srm_token, CancelOrderInstructionV2,
@@ -31,6 +31,7 @@ use crate::{
         SendTakeInstruction,
     },
     matching::{OrderBookState, OrderType, RequestProceeds, Side},
+    volume_tracker::VolumeTracker,
 };
 
 declare_check_assert_macros!(SourceFileId::State);
@@ -60,6 +61,7 @@ pub enum AccountFlag {
     Closed = 1u64 << 8,
     Permissioned = 1u64 << 9,
     CrankAuthorityRequired = 1u64 << 10,
+    GlobalUserVolume = 1u64 << 11,
 }
 
 // Versioned frontend for market accounts.
@@ -578,6 +580,52 @@ impl MarketState {
 
     fn pubkey(&self) -> Pubkey {
         Pubkey::new(cast_slice(&identity(self.own_address) as &[_]))
+    }
+}
+
+pub struct GlobalUserVolume {
+    pub account_flags: u64, // Initialized, GlobalUserVolume
+    pub owner: [u64; 4],
+    maker_volume: VolumeTracker,
+    taker_volume: VolumeTracker,
+    pub maker_fee_tier: FeeTier,
+    pub taker_fee_tier: FeeTier,
+}
+
+impl GlobalUserVolume {
+    pub fn increment_volume(
+        &mut self,
+        timestamp: u64,
+        quantity: u64,
+        mint: &Pubkey,
+        maker: bool,
+    ) -> DexResult<()> {
+        if maker {
+            match self.maker_volume.add(timestamp, quantity, mint) {
+                Ok(Some(vol)) => self.update_fee_tier(vol, maker),
+                Err(msg) => {
+                    solana_program::msg!(&msg);
+                    return Err(DexError::ErrorCode(DexErrorCode::VolumeTrackingUnsupported));
+                }
+                _ => (),
+            }
+        } else {
+            match self.taker_volume.add(timestamp, quantity, mint) {
+                Ok(Some(vol)) => self.update_fee_tier(vol, maker),
+                Err(msg) => {
+                    solana_program::msg!(&msg);
+                    return Err(DexError::ErrorCode(DexErrorCode::VolumeTrackingUnsupported));
+                }
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+
+    // TODO
+    fn update_fee_tier(&mut self, volume: u64, maker: bool) {
+        // Set appropriate fee tier based on volume-based fee schedule
+        todo!()
     }
 }
 
