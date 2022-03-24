@@ -10,6 +10,8 @@
 //! - Make epoch length a constant instead of hard-coding to hours
 //! - Port to Serum DEX
 
+use solana_program::pubkey::Pubkey;
+
 // Number of periods in an epoch
 const PERIODS_PER_EPOCH: usize = 30 * 24;
 // Period = 1 hour
@@ -24,6 +26,8 @@ struct VolumeEntry {
     timestamp: u64,
     volume: u64,
 }
+
+/// Circular buffer to store VolumeEntry items
 struct VolumeBuffer {
     /// Buffer of volume entries
     buff: [VolumeEntry; VOLUME_BUFF_LEN],
@@ -146,36 +150,39 @@ impl VolumeBuffer {
 }
 
 /// Invariants:
-///     last_recalc_ts <= current_volume.timestamp
-///     history.first().timestamp <= last_recalc_ts - 3600 * TRAILING_HOURS
+///     period_start_ts <= period_volume.timestamp
+///     history.first().timestamp <= period_start_ts - 3600 * TRAILING_HOURS
 ///     history.last().timestamp < last_recalc_ts
 ///     total_trailing_volume = sum(history.buff.iter().map(|ve| ve.volume))
 pub struct VolumeTracker {
     /// Buffer of volume entries used to calculate `total_trailing_volume`.
     /// Volumes in the buffer should all have timestamps in the range
-    /// `[last_recalc_ts - TRAILING_HOURS * 3600, last_recalc_ts)`
+    /// `[period_start_ts - SECONDS_PER_EPOCH, period_start_ts)`
     history: VolumeBuffer,
-    /// Volume for the current hour, starting at the last hour boundary
-    current_volume: VolumeEntry,
-    /// The ts of the start of the current period. The total trailing volume is recalculated when the period rolls over.
+    /// Volume for the current period, starting at `period_start_ts`
+    period_volume: VolumeEntry,
+    /// The ts of the start of the current period. The total epoch volume is recalculated when the period rolls over.
     period_start_ts: u64,
-    /// The total volume over the past `TRAILING_HOURS`, as of `last_recalc_ts`
+    /// The total volume over the trailing `EPOCH_LEN` periods, as of `period_start_ts`
     total_trailing_volume: u64,
+    /// The mint address of the token that volume is denominated in
+    mint: Pubkey,
 }
 
 impl VolumeTracker {
-    pub fn new(timestamp: u64) -> Self {
+    pub fn new(timestamp: u64, mint: Pubkey) -> Self {
         Self {
             history: VolumeBuffer::new(),
-            current_volume: VolumeEntry::default(),
+            period_volume: VolumeEntry::default(),
             period_start_ts: timestamp,
             total_trailing_volume: 0,
+            mint,
         }
     }
 
-    // TODO: Test this!!
     /// Adds volume to the tracker; returns `Some(total_trailing_volume)` if it has been recalculated, otherwise returns `None`.
-    pub fn add(&mut self, timestamp: u64, volume: u64) -> Result<Option<u64>, String> {
+    /// Assumes that the quantity is denominated in the same token as `self.mint`.
+    fn native_add(&mut self, timestamp: u64, quantity: u64) -> Result<Option<u64>, String> {
         let s_since_period_start = timestamp - self.period_start_ts;
         let mut res: Option<u64> = None;
         if s_since_period_start >= 3600 {
@@ -183,18 +190,30 @@ impl VolumeTracker {
             self.period_start_ts = timestamp - (s_since_period_start % SECONDS_PER_PERIOD as u64);
             let epoch_start_ts = self.period_start_ts - SECONDS_PER_EPOCH as u64;
             // Push current volume to buffer
-            self.history.push(self.current_volume, true)?;
+            self.history.push(self.period_volume, true)?;
             // Reset current volume to zero
-            self.current_volume.volume = 0;
+            self.period_volume.volume = 0;
             // Clean up old buffer entries
             self.history.pop_to_ts(epoch_start_ts);
             res = Some(self.update_total());
         }
         // Update current volume
         // TODO: what if timestamp < current_volume.timestamp?
-        self.current_volume.volume += volume;
-        self.current_volume.timestamp = timestamp;
+        self.period_volume.volume += quantity;
+        self.period_volume.timestamp = timestamp;
         Ok(res)
+    }
+
+    pub fn add(
+        &mut self,
+        timestamp: u64,
+        quantity: u64,
+        mint: &Pubkey,
+    ) -> Result<Option<u64>, String> {
+        if *mint != self.mint {
+            return Err("Cannot add to volume: mint mismatch.".to_string());
+        }
+        self.native_add(timestamp, quantity)
     }
 
     fn update_total(&mut self) -> u64 {
@@ -210,7 +229,9 @@ impl VolumeTracker {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::time::SystemTime;
+    use std::{str::FromStr, time::SystemTime};
+
+    const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     #[test]
     fn test_volume_buffer() {
@@ -275,57 +296,57 @@ mod test {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let mut vt = VolumeTracker::new(start);
+        let mut vt = VolumeTracker::new(start, Pubkey::from_str(USDC_MINT).unwrap());
         assert_eq!(vt.get_total(), 0);
 
         // 1st hour: 200 units of volume
         // Total == 0
         let mut now = start + 60;
-        assert!(vt.add(now, 100).unwrap().is_none());
+        assert!(vt.native_add(now, 100).unwrap().is_none());
         assert_eq!(vt.get_total(), 0);
         now += 60;
-        assert!(vt.add(now, 100).unwrap().is_none());
+        assert!(vt.native_add(now, 100).unwrap().is_none());
         assert_eq!(vt.get_total(), 0);
 
         // 2nd hour: 100 units of volume
         // Total == 200
         now = start + 3600;
-        let t = vt.add(now, 100).unwrap().unwrap();
+        let t = vt.native_add(now, 100).unwrap().unwrap();
         assert_eq!(t, 200);
         assert_eq!(vt.get_total(), 200);
 
         // 3rd hour: 200 units of volume
         // Total == 300
         now += 4200;
-        let t = vt.add(now, 200).unwrap().unwrap();
+        let t = vt.native_add(now, 200).unwrap().unwrap();
         assert_eq!(t, 300);
         assert_eq!(vt.get_total(), 300);
 
         // 721st hour: 100 units of volume
         // Total == 500
         now = start + 720 * 3600;
-        let t = vt.add(now, 100).unwrap().unwrap();
+        let t = vt.native_add(now, 100).unwrap().unwrap();
         assert_eq!(t, 500);
         assert_eq!(vt.get_total(), 500);
 
         // 722nd hour: 200 units of volume
         // Total == 400
         now = start + 721 * 3600;
-        let t = vt.add(now, 200).unwrap().unwrap();
+        let t = vt.native_add(now, 200).unwrap().unwrap();
         assert_eq!(t, 400);
         assert_eq!(vt.get_total(), 400);
 
         // 723rd hour: 100 units of volume
         // Total == 500
         now = start + 722 * 3600;
-        let t = vt.add(now, 100).unwrap().unwrap();
+        let t = vt.native_add(now, 100).unwrap().unwrap();
         assert_eq!(t, 500);
         assert_eq!(vt.get_total(), 500);
 
         // 1444th hour: 100 units of volume
         // Total == 0
         now = start + 1443 * 3600;
-        let t = vt.add(now, 100).unwrap().unwrap();
+        let t = vt.native_add(now, 100).unwrap().unwrap();
         assert_eq!(t, 0);
         assert_eq!(vt.get_total(), 0);
     }
