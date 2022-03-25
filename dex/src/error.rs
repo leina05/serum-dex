@@ -112,7 +112,7 @@ pub enum DexErrorCode {
     WouldSelfTrade,
     InvalidOpenOrdersAuthority,
 
-    VolumeTrackingUnsupported = 80,
+    VolumeBufferOverflow = 80,
 
     SquareRootError = 90,
     DivisionbyZero,
@@ -138,6 +138,8 @@ pub enum SourceFileId {
     Matching = 2,
     #[error("src/critbit.rs")]
     Critbit = 3,
+    #[error("src/volume_tracker.rs")]
+    VolumeTracker = 4,
 }
 
 #[macro_export]

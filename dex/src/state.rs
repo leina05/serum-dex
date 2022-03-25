@@ -27,6 +27,7 @@ use crate::{
     critbit::Slab,
     error::{DexError, DexErrorCode, DexResult, SourceFileId},
     fees::{self, FeeTier},
+    fractional::Fractional,
     instruction::{
         disable_authority, fee_sweeper, msrm_token, srm_token, CancelOrderInstructionV2,
         InitializeMarketInstruction, MarketInstruction, NewOrderInstructionV3, SelfTradeBehavior,
@@ -600,10 +601,10 @@ impl GlobalUserVolume {
         timestamp: u64,
         base_native_quantity: u64,
         base_decimals: u64,
-        base_price_account: &Price,
+        base_price_account: &Price, // Pyth price account for dollar price
         quote_native_quantity: u64,
         quote_decimals: u64,
-        quote_price_account: &Price,
+        quote_price_account: &Price, // Pyth price account for dollar price
         maker: bool,
     ) -> DexResult<()> {
         let avg_usd = Self::get_avg_usd(
@@ -615,22 +616,12 @@ impl GlobalUserVolume {
             quote_price_account,
         );
         if maker {
-            match self.maker_volume.add(timestamp, avg_usd) {
-                Ok(Some(vol)) => self.update_fee_tier(vol, maker),
-                Err(msg) => {
-                    solana_program::msg!(&msg);
-                    return Err(DexError::ErrorCode(DexErrorCode::VolumeTrackingUnsupported));
-                }
-                _ => (),
+            if let Some(vol) = self.maker_volume.add_fractional(timestamp, avg_usd)? {
+                self.update_fee_tier(vol, maker);
             }
         } else {
-            match self.taker_volume.add(timestamp, avg_usd) {
-                Ok(Some(vol)) => self.update_fee_tier(vol, maker),
-                Err(msg) => {
-                    solana_program::msg!(&msg);
-                    return Err(DexError::ErrorCode(DexErrorCode::VolumeTrackingUnsupported));
-                }
-                _ => (),
+            if let Some(vol) = self.taker_volume.add_fractional(timestamp, avg_usd)? {
+                self.update_fee_tier(vol, maker);
             }
         }
         Ok(())
@@ -645,13 +636,33 @@ impl GlobalUserVolume {
         base_price_account: &Price,
         quote_native_quantity: u64,
         quote_decimals: u64,
-        quote_price_acount: &Price,
-    ) -> u64 {
-        todo!()
+        quote_price_account: &Price,
+    ) -> Fractional {
+        // FIXME: overflow check on casting
+        let base_quantity = Fractional::new(base_native_quantity as i64, base_decimals);
+        let quote_quantity = Fractional::new(quote_native_quantity as i64, quote_decimals);
+
+        // FIXME: unwraps
+        let base_price = base_price_account
+            .get_current_price()
+            .unwrap()
+            .scale_to_exponent(base_decimals as i32 * -1)
+            .map(|pc| Fractional::new(pc.price, base_decimals))
+            .unwrap();
+        let quote_price = quote_price_account
+            .get_current_price()
+            .unwrap()
+            .scale_to_exponent(quote_decimals as i32 * -1)
+            .map(|pc| Fractional::new(pc.price, quote_decimals))
+            .unwrap();
+
+        let base_dollars = base_quantity * base_price;
+        let quote_dollars = quote_quantity * quote_price;
+        (base_dollars + quote_dollars) / Fractional::new(2, 0)
     }
 
     // TODO
-    fn update_fee_tier(&mut self, volume: u64, maker: bool) {
+    fn update_fee_tier(&mut self, volume: Fractional, maker: bool) {
         // Set appropriate fee tier based on volume-based fee schedule
         todo!()
     }

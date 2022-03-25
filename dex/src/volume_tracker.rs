@@ -10,6 +10,13 @@
 //! - Make epoch length a constant instead of hard-coding to hours
 //! - Port to Serum DEX
 
+use crate::{
+    error::{DexErrorCode, DexResult, SourceFileId},
+    fractional::Fractional,
+};
+
+declare_check_assert_macros!(SourceFileId::Matching);
+
 // Number of periods in an epoch
 const PERIODS_PER_EPOCH: usize = 30 * 24;
 // Period = 1 hour
@@ -88,7 +95,7 @@ impl VolumeBuffer {
     ///
     /// * `entry` - The `VolumeEntry` to add the the buffer.
     /// * `overwrite` - Flag representing whether the buffer should overwrite the first entry if it is full.
-    fn push(&mut self, entry: VolumeEntry, overwrite: bool) -> Result<Option<VolumeEntry>, String> {
+    fn push(&mut self, entry: VolumeEntry, overwrite: bool) -> DexResult<Option<VolumeEntry>> {
         let mut res: Option<VolumeEntry> = None;
         if self.len() == VOLUME_BUFF_LEN {
             if overwrite {
@@ -98,7 +105,7 @@ impl VolumeBuffer {
                     unreachable!("If the buffer is full, self.pop() should always return a value.")
                 }
             } else {
-                return Err("Buffer overflow! To overwrite, pass `overwrite = true`".to_string());
+                return Err(DexErrorCode::VolumeBufferOverflow.into());
             }
         }
         if self.len() != 0 {
@@ -163,6 +170,8 @@ pub struct VolumeTracker {
     period_start_ts: u64,
     /// The total volume over the trailing `EPOCH_LEN` periods, as of `period_start_ts`
     total_trailing_volume: u64,
+    /// The trailing decimals of the volume
+    decimals: u8,
 }
 
 impl VolumeTracker {
@@ -172,11 +181,13 @@ impl VolumeTracker {
             period_volume: VolumeEntry::default(),
             period_start_ts: timestamp,
             total_trailing_volume: 0,
+            // Hard-code decimals for now
+            decimals: 9,
         }
     }
 
-    /// Adds volume to the tracker; returns `Some(total_trailing_volume)` if it has been recalculated, otherwise returns `None`.
-    pub fn add(&mut self, timestamp: u64, quantity: u64) -> Result<Option<u64>, String> {
+    /// Adds a quantity to the tracker; returns `Some(total_trailing_volume)` if it has been recalculated, otherwise returns `None`.
+    pub fn add(&mut self, timestamp: u64, quantity: u64) -> DexResult<Option<u64>> {
         let s_since_period_start = timestamp - self.period_start_ts;
         let mut res: Option<u64> = None;
         if s_since_period_start >= 3600 {
@@ -196,6 +207,23 @@ impl VolumeTracker {
         self.period_volume.volume += quantity;
         self.period_volume.timestamp = timestamp;
         Ok(res)
+    }
+    /// Adds a fractional quantity to the tracker; returns
+    /// `Some(total_trailing_volume)` if it has been recalculated, otherwise
+    /// returns `None`.
+    pub fn add_fractional(
+        &mut self,
+        timestamp: u64,
+        quantity: Fractional,
+    ) -> DexResult<Option<Fractional>> {
+        check_assert!(quantity.is_negative())?;
+        let native_quantity = if quantity.exp != self.decimals as u64 {
+            quantity.round(self.decimals as u32)?.m
+        } else {
+            quantity.m
+        };
+        self.add(timestamp, native_quantity as u64)
+            .map(|opt| opt.map(|amt| Fractional::new(amt as i64, self.decimals as u64)))
     }
 
     fn update_total(&mut self) -> u64 {
