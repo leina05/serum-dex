@@ -2481,6 +2481,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyth-client"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f779e98b8c8016d0c1409247a204bd4fcdea8b67ceeef545f04e324d66c49e52"
+dependencies = [
+ "borsh",
+ "borsh-derive 0.9.3",
+ "bytemuck",
+ "num-derive",
+ "num-traits",
+ "serde",
+ "solana-program",
+ "thiserror",
+]
+
+[[package]]
 name = "qstring"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3170,6 +3186,7 @@ dependencies = [
  "itertools 0.9.0",
  "num-traits",
  "num_enum",
+ "pyth-client",
  "safe-transmute",
  "serde",
  "solana-program",
