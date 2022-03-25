@@ -9,6 +9,7 @@ mod tests;
 
 pub mod critbit;
 mod fees;
+mod fractional;
 pub mod instruction;
 pub mod matching;
 pub mod state;

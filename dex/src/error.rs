@@ -114,6 +114,13 @@ pub enum DexErrorCode {
 
     VolumeTrackingUnsupported = 80,
 
+    SquareRootError = 90,
+    DivisionbyZero,
+    NumericalOverflow,
+    DeserializeError,
+    RoundError,
+    SqrtRootError,
+
     Unknown = 1000,
 
     // This contains the line number in the lower 16 bits,
