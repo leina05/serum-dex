@@ -21,6 +21,8 @@ use solana_program::{
 };
 use spl_token::error::TokenError;
 
+use pyth_client::Price;
+
 use crate::{
     critbit::Slab,
     error::{DexError, DexErrorCode, DexResult, SourceFileId},
@@ -596,12 +598,24 @@ impl GlobalUserVolume {
     pub fn increment_volume(
         &mut self,
         timestamp: u64,
-        quantity: u64,
-        mint: &Pubkey,
+        base_native_quantity: u64,
+        base_decimals: u64,
+        base_price_account: &Price,
+        quote_native_quantity: u64,
+        quote_decimals: u64,
+        quote_price_account: &Price,
         maker: bool,
     ) -> DexResult<()> {
+        let avg_usd = Self::get_avg_usd(
+            base_native_quantity,
+            base_decimals,
+            base_price_account,
+            quote_native_quantity,
+            quote_decimals,
+            quote_price_account,
+        );
         if maker {
-            match self.maker_volume.add(timestamp, quantity, mint) {
+            match self.maker_volume.add(timestamp, avg_usd) {
                 Ok(Some(vol)) => self.update_fee_tier(vol, maker),
                 Err(msg) => {
                     solana_program::msg!(&msg);
@@ -610,7 +624,7 @@ impl GlobalUserVolume {
                 _ => (),
             }
         } else {
-            match self.taker_volume.add(timestamp, quantity, mint) {
+            match self.taker_volume.add(timestamp, avg_usd) {
                 Ok(Some(vol)) => self.update_fee_tier(vol, maker),
                 Err(msg) => {
                     solana_program::msg!(&msg);
@@ -620,6 +634,20 @@ impl GlobalUserVolume {
             }
         }
         Ok(())
+    }
+
+    /// Calculate a trade's average dollar value, which is used to track volume.
+    /// Determined by converting both the base and quote quantities to USD using
+    /// a Pyth price oracle and averaging the two dollar values.
+    fn get_avg_usd(
+        base_native_quantity: u64,
+        base_decimals: u64,
+        base_price_account: &Price,
+        quote_native_quantity: u64,
+        quote_decimals: u64,
+        quote_price_acount: &Price,
+    ) -> u64 {
+        todo!()
     }
 
     // TODO
