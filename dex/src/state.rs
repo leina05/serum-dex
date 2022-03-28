@@ -586,6 +586,7 @@ impl MarketState {
     }
 }
 
+/// Account to track user volume across all DEX markets
 pub struct GlobalUserVolume {
     pub account_flags: u64, // Initialized, GlobalUserVolume
     pub owner: [u64; 4],

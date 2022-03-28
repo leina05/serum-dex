@@ -4,11 +4,11 @@
 //! - All timestamps in seconds
 //!
 //! TODO:
-//! - Decimals
-//! - Proper timestamps
-//! - Handle out of order timestamps
-//! - Make epoch length a constant instead of hard-coding to hours
-//! - Port to Serum DEX
+//! -[x] Decimals
+//! -[ ] Proper timestamps
+//! -[ ] Handle out of order timestamps
+//! -[x] Make epoch length a constant instead of hard-coding to hours
+//! -[x] Port to Serum DEX
 
 use crate::{
     error::{DexErrorCode, DexResult, SourceFileId},
@@ -216,7 +216,8 @@ impl VolumeTracker {
         timestamp: u64,
         quantity: Fractional,
     ) -> DexResult<Option<Fractional>> {
-        check_assert!(quantity.is_negative())?;
+        check_assert!(!quantity.is_negative())?;
+        // Always round number of decimals to `self.decimals`
         let native_quantity = if quantity.exp != self.decimals as u64 {
             quantity.round(self.decimals as u32)?.m
         } else {
@@ -233,6 +234,14 @@ impl VolumeTracker {
 
     pub fn get_total(&self) -> u64 {
         self.total_trailing_volume
+    }
+
+    pub fn get_period_volume(&self) -> u64 {
+        self.period_volume.volume
+    }
+
+    pub fn get_period_volume_fractional(&self) -> Fractional {
+        Fractional::new(self.period_volume.volume as i64, self.decimals as u64)
     }
 }
 
@@ -357,5 +366,17 @@ mod test {
         let t = vt.add(now, 100).unwrap().unwrap();
         assert_eq!(t, 0);
         assert_eq!(vt.get_total(), 0);
+
+        // Test add_fractional
+        let pv = vt.get_period_volume_fractional();
+        assert_eq!(pv.m as i64, 100);
+
+        vt.add_fractional(now + 1, Fractional::new(12300, 3))
+            .unwrap();
+        let pv = vt.get_period_volume_fractional();
+
+        assert_eq!(pv.m, 12_300_000_100);
+        assert_eq!(pv.exp, vt.decimals as u64);
+        assert_eq!(format!("{}", pv), "12.3000001".to_string());
     }
 }
