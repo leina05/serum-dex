@@ -16,8 +16,8 @@ use num_traits::FromPrimitive;
 use safe_transmute::{self, to_bytes::transmute_to_bytes, trivial::TriviallyTransmutable};
 
 use solana_program::{
-    account_info::AccountInfo, program_error::ProgramError, program_pack::Pack, pubkey::Pubkey,
-    rent::Rent, sysvar::Sysvar,
+    account_info::AccountInfo, clock::Clock, program_error::ProgramError, program_pack::Pack,
+    pubkey::Pubkey, rent::Rent, sysvar::Sysvar,
 };
 use spl_token::error::TokenError;
 
@@ -219,7 +219,8 @@ impl<'a> Market<'a> {
         coin_price_account: &Pubkey,
         pc_price_account: &Pubkey,
     ) -> DexResult {
-        todo!()
+        // TODO
+        Ok(())
     }
 }
 
@@ -2995,8 +2996,7 @@ impl State {
             // PDA is derived from the owner wallet address
             let (global_user_key, bump) = Pubkey::find_program_address(&seeds, program_id);
 
-            // TODO
-            let global_user_state = if let Ok(global_user_index) = global_user_accounts
+            let mut global_user_state = if let Ok(global_user_index) = global_user_accounts
                 .binary_search_by_key(&global_user_key, |account_info| *account_info.key)
             {
                 GlobalUserState::load(&global_user_accounts[global_user_index], owner_wallet)?
@@ -3017,6 +3017,7 @@ impl State {
                     owner_slot,
                     client_order_id,
                 } => {
+                    let timestamp = Clock::get()?.unix_timestamp as u64;
                     match side {
                         Side::Bid => {
                             if maker {
@@ -3025,23 +3026,19 @@ impl State {
                                 open_orders.native_coin_free += native_qty_received;
                                 open_orders.native_pc_free += native_fee_or_rebate;
                             }
-                            // paid quote
-                            // received base
-                            // TODO: increment volume counter:
-                            // 1. Get current timestamp
-                            // 2. Get mint account infos and get decimals
-                            //      - either mint accounts need to be passed in, or decimals need to be stored somewhere (probably the Market account)
-                            // 3. Get pyth price accounts
-                            // global_user_state.increment_volume(
-                            //     timestamp,
-                            //     native_qty_received,
-                            //     base_decimals,
-                            //     pyth_price,
-                            //     native_qty_paid,
-                            //     quote_decimals,
-                            //     pyth_price,
-                            //     maker,
-                            // )
+                            // increment volume counter
+                            //  - paid quote
+                            //  - received base
+                            global_user_state.increment_volume(
+                                timestamp,
+                                native_qty_received,
+                                market.coin_decimals,
+                                coin_pyth_price,
+                                native_qty_paid,
+                                market.pc_decimals,
+                                pc_pyth_price,
+                                maker,
+                            )?;
                         }
                         Side::Ask => {
                             if maker {
@@ -3050,6 +3047,18 @@ impl State {
                                 open_orders.native_pc_free += native_qty_received;
                             }
                             // TODO: increment volume counter
+                            //  - received quote
+                            //  - paid base
+                            global_user_state.increment_volume(
+                                timestamp,
+                                native_qty_paid,
+                                market.coin_decimals,
+                                coin_pyth_price,
+                                native_qty_received,
+                                market.pc_decimals,
+                                pc_pyth_price,
+                                maker,
+                            )?;
                         }
                     };
                     if !maker {
