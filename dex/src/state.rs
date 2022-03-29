@@ -330,40 +330,45 @@ pub struct MarketState {
     pub pc_mint: [u64; 4],
 
     // 14
+    pub coin_decimals: u64,
+    // 15
+    pub pc_decimals: u64,
+
+    // 16
     pub coin_vault: [u64; 4],
-    // 18
+    // 20
     pub coin_deposits_total: u64,
-    // 19
+    // 21
     pub coin_fees_accrued: u64,
 
-    // 20
+    // 22
     pub pc_vault: [u64; 4],
-    // 24
+    // 26
     pub pc_deposits_total: u64,
-    // 25
+    // 27
     pub pc_fees_accrued: u64,
 
-    // 26
+    // 28
     pub pc_dust_threshold: u64,
 
-    // 27
+    // 29
     pub req_q: [u64; 4],
-    // 31
+    // 33
     pub event_q: [u64; 4],
 
-    // 35
+    // 37
     pub bids: [u64; 4],
-    // 39
+    // 41
     pub asks: [u64; 4],
 
-    // 43
+    // 45
     pub coin_lot_size: u64,
-    // 44
+    // 46
     pub pc_lot_size: u64,
 
-    // 45
+    // 47
     pub fee_rate_bps: u64,
-    // 46
+    // 48
     pub referrer_rebates_accrued: u64,
 }
 #[cfg(target_endian = "little")]
@@ -3334,8 +3339,14 @@ impl State {
         let asks = args.get_asks();
         let coin_vault = args.coin_vault_and_mint.get_account().inner();
         let coin_mint = args.coin_vault_and_mint.get_mint().inner();
+        let coin_decimals =
+            spl_token::state::Mint::unpack_unchecked(coin_mint.try_borrow_data()?.as_ref())?
+                .decimals as u64;
         let pc_vault = args.pc_vault_and_mint.get_account().inner();
         let pc_mint = args.pc_vault_and_mint.get_mint().inner();
+        let pc_decimals =
+            spl_token::state::Mint::unpack_unchecked(pc_mint.try_borrow_data()?.as_ref())?.decimals
+                as u64;
         let market_authority = args.market_authority;
         let prune_authority = args.prune_authority;
         let consume_events_authority = args.consume_events_authority;
@@ -3406,6 +3417,7 @@ impl State {
             account_flags: account_flags.bits(),
 
             coin_mint: coin_mint.key.to_aligned_bytes(),
+            coin_decimals,
             coin_vault: coin_vault.key.to_aligned_bytes(),
             coin_deposits_total: 0,
             coin_fees_accrued: 0,
@@ -3416,6 +3428,7 @@ impl State {
             asks: asks.key.to_aligned_bytes(),
 
             pc_mint: pc_mint.key.to_aligned_bytes(),
+            pc_decimals,
             pc_vault: pc_vault.key.to_aligned_bytes(),
             pc_deposits_total: 0,
             pc_fees_accrued: 0,
