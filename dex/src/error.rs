@@ -95,8 +95,9 @@ pub enum DexErrorCode {
     WrongAsksAccount,
     WrongRequestQueueAccount,
     WrongEventQueueAccount,
+    WrongGlobalUserAccount = 50,
 
-    RequestQueueFull = 50,
+    RequestQueueFull,
     EventQueueFull,
     MarketIsDisabled,
     WrongSigner,
@@ -111,6 +112,8 @@ pub enum DexErrorCode {
 
     WouldSelfTrade,
     InvalidOpenOrdersAuthority,
+
+    GlobalUserAccountNotProvided,
 
     VolumeBufferOverflow = 80,
 

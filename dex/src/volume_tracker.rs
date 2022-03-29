@@ -27,21 +27,24 @@ const SECONDS_PER_EPOCH: usize = PERIODS_PER_EPOCH * SECONDS_PER_PERIOD;
 const VOLUME_BUFF_LEN: usize = PERIODS_PER_EPOCH;
 
 #[derive(Debug, Default, Copy, Clone)]
+#[repr(packed)]
 struct VolumeEntry {
     timestamp: u64,
     volume: u64,
 }
 
 /// Circular buffer to store VolumeEntry items
+#[repr(packed)]
+#[derive(Copy, Clone)]
 struct VolumeBuffer {
-    /// Buffer of volume entries
-    buff: [VolumeEntry; VOLUME_BUFF_LEN],
     /// Index of the last (most recent) entry
     last: usize,
     /// Index of the first (least recent) entry
     first: usize,
     /// Number of entries in the buffer
     len: usize,
+    /// Buffer of volume entries
+    buff: [VolumeEntry; VOLUME_BUFF_LEN],
 }
 
 impl VolumeBuffer {
@@ -56,18 +59,18 @@ impl VolumeBuffer {
     }
 
     /// Returns an Option containing the first (least recent) entry. If the buffer is empty, returns None.
-    fn get_first(&self) -> Option<&VolumeEntry> {
+    fn get_first(&self) -> Option<VolumeEntry> {
         if self.len() > 0 {
-            Some(&self.buff[self.first])
+            Some(self.buff[self.first])
         } else {
             None
         }
     }
 
     /// Get the last (most recent) entry
-    fn get_last(&self) -> Option<&VolumeEntry> {
+    fn get_last(&self) -> Option<VolumeEntry> {
         if self.len() > 0 {
-            Some(&self.buff[self.last])
+            Some(self.buff[self.last])
         } else {
             None
         }
@@ -78,12 +81,22 @@ impl VolumeBuffer {
         self.len
     }
 
+    /// Increment the first index
+    fn increment_first(&mut self) {
+        self.first = Self::increment(self.first);
+    }
+
+    /// Increment the last index
+    fn increment_last(&mut self) {
+        self.last = Self::increment(self.last);
+    }
+
     /// Increment an index; if the index exceeds the buffer size go back to 0
-    fn increment(val: &mut usize) {
-        if *val == VOLUME_BUFF_LEN - 1 {
-            *val = 0;
+    fn increment(val: usize) -> usize {
+        if val == VOLUME_BUFF_LEN - 1 {
+            0
         } else {
-            *val += 1;
+            val + 1
         }
     }
 
@@ -110,7 +123,7 @@ impl VolumeBuffer {
         }
         if self.len() != 0 {
             // If the buffer is not empty, increment self.last
-            Self::increment(&mut self.last);
+            self.increment_last();
         }
         // Add the new entry
         self.buff[self.last] = entry;
@@ -125,7 +138,7 @@ impl VolumeBuffer {
         } else {
             let popped = self.buff[self.first];
             self.buff[self.first] = VolumeEntry::default();
-            Self::increment(&mut self.first);
+            self.increment_first();
             self.len -= 1;
             Some(popped)
         }
@@ -159,6 +172,8 @@ impl VolumeBuffer {
 ///     history.first().timestamp <= period_start_ts - 3600 * TRAILING_HOURS
 ///     history.last().timestamp < last_recalc_ts
 ///     total_trailing_volume = sum(history.buff.iter().map(|ve| ve.volume))
+#[repr(packed)]
+#[derive(Copy, Clone)]
 pub struct VolumeTracker {
     /// Buffer of volume entries used to calculate `total_trailing_volume`.
     /// Volumes in the buffer should all have timestamps in the range
@@ -250,6 +265,11 @@ mod test {
     use super::*;
     use std::time::SystemTime;
 
+    // Wrapper to avoid unaligned reference error
+    fn assert_eq(left: u64, right: u64) {
+        assert_eq!(left, right)
+    }
+
     #[test]
     fn test_volume_buffer() {
         let mut vb = VolumeBuffer::new();
@@ -270,8 +290,9 @@ mod test {
             assert_eq!(vb.len(), i + 1);
         }
         // Check first and last entries
-        assert_eq!(vb.get_first().unwrap().volume, 0);
-        assert_eq!(vb.get_last().unwrap().volume, (VOLUME_BUFF_LEN - 1) as u64);
+        // Annoyingly necessary to bind volume to a variable before passing into `assert_eq` to avoid unaligned reference
+        assert_eq(vb.get_first().unwrap().volume, 0);
+        assert_eq(vb.get_last().unwrap().volume, (VOLUME_BUFF_LEN - 1) as u64);
         let ve = VolumeEntry {
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -284,8 +305,8 @@ mod test {
             .expect_err("Expected buffer overflow error.");
         let res = vb.push(ve, true).unwrap();
         assert!(matches!(res, Some(e) if e.volume == 0));
-        assert_eq!(vb.get_first().unwrap().volume, 1);
-        assert_eq!(vb.get_last().unwrap().volume, (VOLUME_BUFF_LEN) as u64);
+        assert_eq(vb.get_first().unwrap().volume, 1);
+        assert_eq(vb.get_last().unwrap().volume, (VOLUME_BUFF_LEN) as u64);
         // Length should stay the same since we are overwriting
         assert_eq!(vb.len(), VOLUME_BUFF_LEN);
 
@@ -294,7 +315,7 @@ mod test {
         let popped = vb.pop_to_ts(min_ts);
         assert_eq!(popped.len(), VOLUME_BUFF_LEN / 2);
         assert_eq!(vb.len(), VOLUME_BUFF_LEN / 2);
-        assert_eq!(vb.get_first().unwrap().timestamp, min_ts);
+        assert_eq(vb.get_first().unwrap().timestamp, min_ts);
 
         // Pop all elements from the buffer
         for i in VOLUME_BUFF_LEN / 2..VOLUME_BUFF_LEN {
@@ -377,6 +398,6 @@ mod test {
 
         assert_eq!(pv.m, 12_300_000_100);
         assert_eq!(pv.exp, vt.decimals as u64);
-        assert_eq!(format!("{}", pv), "12.3000001".to_string());
+        assert_eq!(format!("{}", pv), "12.300000100".to_string());
     }
 }

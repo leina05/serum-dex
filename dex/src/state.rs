@@ -21,11 +21,11 @@ use solana_program::{
 };
 use spl_token::error::TokenError;
 
-use pyth_client::Price;
+use pyth_client::{load_price, Price};
 
 use crate::{
     critbit::Slab,
-    error::{DexError, DexErrorCode, DexResult, SourceFileId},
+    error::{DexErrorCode, DexResult, SourceFileId},
     fees::{self, FeeTier},
     fractional::Fractional,
     instruction::{
@@ -49,6 +49,15 @@ impl ToAlignedBytes for Pubkey {
         cast(self.to_bytes())
     }
 }
+pub trait FromAlignedBytes {
+    fn from_aligned_bytes(bytes: [u64; 4]) -> Self;
+}
+
+impl FromAlignedBytes for Pubkey {
+    fn from_aligned_bytes(bytes: [u64; 4]) -> Self {
+        Pubkey::new(cast_slice(&bytes))
+    }
+}
 
 #[derive(Copy, Clone, BitFlags, Debug, Eq, PartialEq)]
 #[repr(u64)]
@@ -64,7 +73,7 @@ pub enum AccountFlag {
     Closed = 1u64 << 8,
     Permissioned = 1u64 << 9,
     CrankAuthorityRequired = 1u64 << 10,
-    GlobalUserVolume = 1u64 << 11,
+    GlobalUserState = 1u64 << 11,
 }
 
 // Versioned frontend for market accounts.
@@ -158,6 +167,7 @@ impl<'a> Market<'a> {
         }
     }
 
+    /// Loads OpenOrders struct from AccountInfo. If the account has not yet been initialized, intitialize it.
     pub fn load_orders_mut(
         &self,
         orders_account: &'a AccountInfo,
@@ -200,6 +210,16 @@ impl<'a> Market<'a> {
         }
 
         Ok(open_orders)
+    }
+
+    /// Check that provided Pyth price account keys are valid for the market
+    /// Valid price accounts will be <coin>/USD and <pc>/USD.
+    fn check_pyth_accounts(
+        &self,
+        coin_price_account: &Pubkey,
+        pc_price_account: &Pubkey,
+    ) -> DexResult {
+        todo!()
     }
 }
 
@@ -582,13 +602,15 @@ impl MarketState {
     }
 
     fn pubkey(&self) -> Pubkey {
-        Pubkey::new(cast_slice(&identity(self.own_address) as &[_]))
+        Pubkey::from_aligned_bytes(self.own_address)
     }
 }
 
 /// Account to track user volume across all DEX markets
-pub struct GlobalUserVolume {
-    pub account_flags: u64, // Initialized, GlobalUserVolume
+#[repr(packed)]
+#[derive(Copy, Clone)]
+pub struct GlobalUserState {
+    pub account_flags: u64, // Initialized, GlobalUserState
     pub owner: [u64; 4],
     maker_volume: VolumeTracker,
     taker_volume: VolumeTracker,
@@ -596,7 +618,39 @@ pub struct GlobalUserVolume {
     pub taker_fee_tier: FeeTier,
 }
 
-impl GlobalUserVolume {
+unsafe impl Pod for GlobalUserState {}
+unsafe impl Zeroable for GlobalUserState {}
+
+impl<'a> GlobalUserState {
+    fn check_flags(&self) -> DexResult {
+        let flags = BitFlags::from_bits(self.account_flags)
+            .map_err(|_| DexErrorCode::InvalidMarketFlags)?;
+        let required_flags = AccountFlag::Initialized | AccountFlag::GlobalUserState;
+        if flags != required_flags {
+            Err(DexErrorCode::WrongGlobalUserAccount)?
+        }
+        Ok(())
+    }
+    pub fn load(
+        global_user_account: &'a AccountInfo,
+        owner_pk: &[u64; 4],
+    ) -> DexResult<RefMut<'a, Self>> {
+        let data = global_user_account.try_borrow_mut_data()?;
+        let global_user_state: RefMut<GlobalUserState> =
+            RefMut::map(data, |data| from_bytes_mut(data));
+        if global_user_state.account_flags == 0 {
+            // TODO: initialize account
+            unimplemented!()
+        }
+        global_user_state.check_flags()?;
+        // Confirm that the expected owner owns the account
+        // identity() call is necessary to avoid unaligned reference error
+
+        check_assert_eq!(&identity(global_user_state.owner), owner_pk)
+            .map_err(|_| DexErrorCode::WrongGlobalUserAccount)?;
+
+        Ok(global_user_state)
+    }
     pub fn increment_volume(
         &mut self,
         timestamp: u64,
@@ -1538,6 +1592,7 @@ pub mod fuzz_account_parser {
 }
 
 pub(crate) mod account_parser {
+
     use super::*;
 
     macro_rules! declare_validated_account_wrapper {
@@ -2020,8 +2075,11 @@ pub(crate) mod account_parser {
         pub limit: u16,
         pub program_id: &'a Pubkey,
         pub open_orders_accounts: &'a [AccountInfo<'b>],
+        pub global_user_accounts: &'a [AccountInfo<'b>],
         pub market: Market<'a>,
         pub event_q: EventQueue<'a>,
+        pub coin_pyth_price: &'a Price,
+        pub pc_pyth_price: &'a Price,
     }
     impl<'a, 'b: 'a> ConsumeEventsArgs<'a, 'b> {
         pub fn with_parsed_args<T>(
@@ -2030,26 +2088,43 @@ pub(crate) mod account_parser {
             limit: u16,
             f: impl FnOnce(ConsumeEventsArgs) -> DexResult<T>,
         ) -> DexResult<T> {
-            check_assert!(accounts.len() >= 5)?;
+            // user_accounts.len() should be >= 2
+            check_assert!(accounts.len() >= 8)?;
             #[rustfmt::skip]
             let (
                 &[],
-                open_orders_accounts,
+                user_accounts,
                 &[
                     ref market_acc,
                     ref event_q_acc,
+                    ref coin_pyth_price_acc,
+                    ref pc_pyth_price_acc
                 ],
                 _
-            ) = array_refs![accounts, 0; .. ; 2, 2];
+            ) = array_refs![accounts, 0; .. ; 4, 2];
+            // Should be an even number of user accounts, as there should be 1
+            // open orders account and one global user account for each user
+            check_assert!(user_accounts.len() % 2 == 0)?;
+            let open_orders_accounts = &user_accounts[..user_accounts.len() / 2];
+            let global_user_accounts = &user_accounts[user_accounts.len() / 2..];
             let market = Market::load(market_acc, program_id, true)?;
             check_assert!(market.consume_events_authority().is_none())?;
             let event_q = market.load_event_queue_mut(event_q_acc)?;
+            market.check_pyth_accounts(coin_pyth_price_acc.key, pc_pyth_price_acc.key)?;
+            let coin_price_data = coin_pyth_price_acc.try_borrow_data()?;
+            let coin_pyth_price =
+                load_price(&coin_price_data).map_err(|e| ProgramError::from(e))?;
+            let pc_price_data = pc_pyth_price_acc.try_borrow_data()?;
+            let pc_pyth_price = load_price(&pc_price_data).map_err(|e| ProgramError::from(e))?;
             let args = ConsumeEventsArgs {
                 limit,
                 program_id,
                 open_orders_accounts,
+                global_user_accounts,
                 market,
                 event_q,
+                coin_pyth_price,
+                pc_pyth_price,
             };
             f(args)
         }
@@ -2060,17 +2135,22 @@ pub(crate) mod account_parser {
             limit: u16,
             f: impl FnOnce(ConsumeEventsArgs) -> DexResult<T>,
         ) -> DexResult<T> {
-            check_assert!(accounts.len() >= 4)?;
+            // user_accounts.len() should be >= 2
+            check_assert!(accounts.len() >= 7)?;
             #[rustfmt::skip]
             let (
                 &[],
-                open_orders_accounts,
+                user_accounts,
                 &[
                     ref market_acc,
                     ref event_q_acc,
+                    ref coin_pyth_price_acc,
+                    ref pc_pyth_price_acc,
                     ref consume_events_auth,
                 ]
-            ) = array_refs![accounts, 0; .. ; 3];
+            ) = array_refs![accounts, 0; .. ; 5];
+            let open_orders_accounts = &user_accounts[..user_accounts.len() / 2];
+            let global_user_accounts = &user_accounts[user_accounts.len() / 2..];
             let market = Market::load(market_acc, program_id, true)?;
             check_assert!(consume_events_auth.is_signer)?;
             check_assert_eq!(
@@ -2078,11 +2158,19 @@ pub(crate) mod account_parser {
                 market.consume_events_authority()
             )?;
             let event_q = market.load_event_queue_mut(event_q_acc)?;
+            let coin_price_data = coin_pyth_price_acc.try_borrow_data()?;
+            let coin_pyth_price =
+                load_price(&coin_price_data).map_err(|e| ProgramError::from(e))?;
+            let pc_price_data = pc_pyth_price_acc.try_borrow_data()?;
+            let pc_pyth_price = load_price(&pc_price_data).map_err(|e| ProgramError::from(e))?;
             let args = ConsumeEventsArgs {
                 limit,
                 program_id,
                 open_orders_accounts,
+                global_user_accounts,
                 market,
+                coin_pyth_price,
+                pc_pyth_price,
                 event_q,
             };
             f(args)
@@ -2858,8 +2946,11 @@ impl State {
             limit,
             program_id,
             open_orders_accounts,
+            global_user_accounts,
             market,
             mut event_q,
+            coin_pyth_price,
+            pc_pyth_price,
         } = args;
 
         for _i in 0u16..limit {
@@ -2870,6 +2961,7 @@ impl State {
 
             let view = event.as_view()?;
             let owner: [u64; 4] = event.owner;
+            // Get open orders account
             let owner_index: Result<usize, usize> = open_orders_accounts
                 .binary_search_by_key(&owner, |account_info| account_info.key.to_aligned_bytes());
             let mut open_orders: RefMut<OpenOrders> = match owner_index {
@@ -2882,13 +2974,30 @@ impl State {
                     None,
                 )?,
             };
-
             check_assert!(event.owner_slot < 128)?;
             check_assert_eq!(&open_orders.slot_side(event.owner_slot), &Some(view.side()))?;
             check_assert_eq!(
                 open_orders.orders[event.owner_slot as usize],
                 event.order_id
             )?;
+
+            // Get global user accounts
+            // Global user accounts should be PDAs, so they can be looked up
+            // based on the owner's pubkey using `find_program_address`
+            //  - maybe we should store the bump seed in the global account?
+            let owner_wallet = &identity(open_orders.owner);
+            let seeds = [cast_slice(owner_wallet), "global_user_account".as_bytes()];
+            // PDA is derived from the owner wallet address
+            let (global_user_key, bump) = Pubkey::find_program_address(&seeds, program_id);
+
+            // TODO
+            let global_user_state = if let Ok(global_user_index) = global_user_accounts
+                .binary_search_by_key(&global_user_key, |account_info| *account_info.key)
+            {
+                GlobalUserState::load(&global_user_accounts[global_user_index], owner_wallet)?
+            } else {
+                return Err(DexErrorCode::GlobalUserAccountNotProvided.into());
+            };
 
             match event.as_view()? {
                 EventView::Fill {
@@ -2904,18 +3013,39 @@ impl State {
                     client_order_id,
                 } => {
                     match side {
-                        Side::Bid if maker => {
-                            open_orders.native_pc_total -= native_qty_paid;
-                            open_orders.native_coin_total += native_qty_received;
-                            open_orders.native_coin_free += native_qty_received;
-                            open_orders.native_pc_free += native_fee_or_rebate;
+                        Side::Bid => {
+                            if maker {
+                                open_orders.native_pc_total -= native_qty_paid;
+                                open_orders.native_coin_total += native_qty_received;
+                                open_orders.native_coin_free += native_qty_received;
+                                open_orders.native_pc_free += native_fee_or_rebate;
+                            }
+                            // paid quote
+                            // received base
+                            // TODO: increment volume counter:
+                            // 1. Get current timestamp
+                            // 2. Get mint account infos and get decimals
+                            //      - either mint accounts need to be passed in, or decimals need to be stored somewhere (probably the Market account)
+                            // 3. Get pyth price accounts
+                            // global_user_state.increment_volume(
+                            //     timestamp,
+                            //     native_qty_received,
+                            //     base_decimals,
+                            //     pyth_price,
+                            //     native_qty_paid,
+                            //     quote_decimals,
+                            //     pyth_price,
+                            //     maker,
+                            // )
                         }
-                        Side::Ask if maker => {
-                            open_orders.native_coin_total -= native_qty_paid;
-                            open_orders.native_pc_total += native_qty_received;
-                            open_orders.native_pc_free += native_qty_received;
+                        Side::Ask => {
+                            if maker {
+                                open_orders.native_coin_total -= native_qty_paid;
+                                open_orders.native_pc_total += native_qty_received;
+                                open_orders.native_pc_free += native_qty_received;
+                            }
+                            // TODO: increment volume counter
                         }
-                        _ => (),
                     };
                     if !maker {
                         let referrer_rebate = fees::referrer_rebate(native_fee_or_rebate);
