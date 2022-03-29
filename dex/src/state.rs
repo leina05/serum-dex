@@ -657,24 +657,26 @@ impl<'a> GlobalUserState {
 
         Ok(global_user_state)
     }
+
+    /// Increment a user's global volume
     pub fn increment_volume(
         &mut self,
         timestamp: u64,
-        base_native_quantity: u64,
-        base_decimals: u64,
-        base_price_account: &Price, // Pyth price account for dollar price
-        quote_native_quantity: u64,
-        quote_decimals: u64,
-        quote_price_account: &Price, // Pyth price account for dollar price
+        coin_native_quantity: u64,
+        coin_decimals: u64,
+        coin_price_account: &Price, // Pyth price account for dollar price
+        pc_native_quantity: u64,
+        pc_decimals: u64,
+        pc_price_account: &Price, // Pyth price account for dollar price
         maker: bool,
     ) -> DexResult<()> {
         let avg_usd = Self::get_avg_usd(
-            base_native_quantity,
-            base_decimals,
-            base_price_account,
-            quote_native_quantity,
-            quote_decimals,
-            quote_price_account,
+            coin_native_quantity,
+            coin_decimals,
+            coin_price_account,
+            pc_native_quantity,
+            pc_decimals,
+            pc_price_account,
         );
         if maker {
             if let Some(vol) = self.maker_volume.add_fractional(timestamp, avg_usd)? {
@@ -692,34 +694,34 @@ impl<'a> GlobalUserState {
     /// Determined by converting both the base and quote quantities to USD using
     /// a Pyth price oracle and averaging the two dollar values.
     fn get_avg_usd(
-        base_native_quantity: u64,
-        base_decimals: u64,
-        base_price_account: &Price,
-        quote_native_quantity: u64,
-        quote_decimals: u64,
-        quote_price_account: &Price,
+        coin_native_quantity: u64,
+        coin_decimals: u64,
+        coin_price_account: &Price,
+        pc_native_quantity: u64,
+        pc_decimals: u64,
+        pc_price_account: &Price,
     ) -> Fractional {
         // FIXME: overflow check on casting
-        let base_quantity = Fractional::new(base_native_quantity as i64, base_decimals);
-        let quote_quantity = Fractional::new(quote_native_quantity as i64, quote_decimals);
+        let coin_quantity = Fractional::new(coin_native_quantity as i64, coin_decimals);
+        let pc_quantity = Fractional::new(pc_native_quantity as i64, pc_decimals);
 
         // FIXME: unwraps
-        let base_price = base_price_account
+        let coin_price = coin_price_account
             .get_current_price()
             .unwrap()
-            .scale_to_exponent(base_decimals as i32 * -1)
-            .map(|pc| Fractional::new(pc.price, base_decimals))
+            .scale_to_exponent(coin_decimals as i32 * -1)
+            .map(|price_config| Fractional::new(price_config.price, coin_decimals))
             .unwrap();
-        let quote_price = quote_price_account
+        let pc_price = pc_price_account
             .get_current_price()
             .unwrap()
-            .scale_to_exponent(quote_decimals as i32 * -1)
-            .map(|pc| Fractional::new(pc.price, quote_decimals))
+            .scale_to_exponent(pc_decimals as i32 * -1)
+            .map(|price_config| Fractional::new(price_config.price, pc_decimals))
             .unwrap();
 
-        let base_dollars = base_quantity * base_price;
-        let quote_dollars = quote_quantity * quote_price;
-        (base_dollars + quote_dollars) / Fractional::new(2, 0)
+        let coin_dollars = coin_quantity * coin_price;
+        let pc_dollars = pc_quantity * pc_price;
+        (coin_dollars + pc_dollars) / Fractional::new(2, 0)
     }
 
     // TODO
