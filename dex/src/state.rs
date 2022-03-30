@@ -1,7 +1,12 @@
 #![cfg_attr(not(feature = "program"), allow(unused))]
 use num_enum::TryFromPrimitive;
 use std::{
-    cell::RefMut, convert::identity, convert::TryInto, mem::size_of, num::NonZeroU64, ops::Deref,
+    cell::{Ref, RefMut},
+    convert::identity,
+    convert::TryInto,
+    mem::size_of,
+    num::NonZeroU64,
+    ops::Deref,
     ops::DerefMut,
 };
 
@@ -21,7 +26,7 @@ use solana_program::{
 };
 use spl_token::error::TokenError;
 
-use pyth_client::{load_price, Price};
+use pyth_client::{load_price, Price, PriceStatus};
 
 use crate::{
     critbit::Slab,
@@ -214,13 +219,25 @@ impl<'a> Market<'a> {
 
     /// Check that provided Pyth price account keys are valid for the market
     /// Valid price accounts will be <coin>/USD and <pc>/USD.
-    fn check_pyth_accounts(
+    fn load_price_accounts(
         &self,
-        coin_price_account: &Pubkey,
-        pc_price_account: &Pubkey,
-    ) -> DexResult {
-        // TODO
-        Ok(())
+        coin_price_account: &'a AccountInfo,
+        pc_price_account: &'a AccountInfo,
+    ) -> DexResult<(Price, Price)> {
+        // TODO: check that accounts are valid for this market
+        let coin_price_data: Ref<'a, &mut [u8]> = coin_price_account.try_borrow_data()?;
+        let coin_pyth_price = load_price(&coin_price_data).map_err(|e| ProgramError::from(e))?;
+        check_assert_eq!(
+            coin_pyth_price.get_current_price_status(),
+            PriceStatus::Trading
+        );
+        let pc_price_data = pc_price_account.try_borrow_data()?;
+        let pc_pyth_price = load_price(&pc_price_data).map_err(|e| ProgramError::from(e))?;
+        check_assert_eq!(
+            pc_pyth_price.get_current_price_status(),
+            PriceStatus::Trading
+        );
+        Ok((*coin_pyth_price, *pc_pyth_price))
     }
 }
 
@@ -646,7 +663,7 @@ impl<'a> GlobalUserState {
             RefMut::map(data, |data| from_bytes_mut(data));
         if global_user_state.account_flags == 0 {
             // TODO: initialize account
-            unimplemented!()
+            todo!()
         }
         global_user_state.check_flags()?;
         // Confirm that the expected owner owns the account
@@ -1601,6 +1618,8 @@ pub mod fuzz_account_parser {
 
 pub(crate) mod account_parser {
 
+    use pyth_client::PriceStatus;
+
     use super::*;
 
     macro_rules! declare_validated_account_wrapper {
@@ -2118,12 +2137,8 @@ pub(crate) mod account_parser {
             let market = Market::load(market_acc, program_id, true)?;
             check_assert!(market.consume_events_authority().is_none())?;
             let event_q = market.load_event_queue_mut(event_q_acc)?;
-            market.check_pyth_accounts(coin_pyth_price_acc.key, pc_pyth_price_acc.key)?;
-            let coin_price_data = coin_pyth_price_acc.try_borrow_data()?;
-            let coin_pyth_price =
-                load_price(&coin_price_data).map_err(|e| ProgramError::from(e))?;
-            let pc_price_data = pc_pyth_price_acc.try_borrow_data()?;
-            let pc_pyth_price = load_price(&pc_price_data).map_err(|e| ProgramError::from(e))?;
+            let (coin_pyth_price, pc_pyth_price) =
+                &market.load_price_accounts(coin_pyth_price_acc, pc_pyth_price_acc)?;
             let args = ConsumeEventsArgs {
                 limit,
                 program_id,
