@@ -21,8 +21,15 @@ use num_traits::FromPrimitive;
 use safe_transmute::{self, to_bytes::transmute_to_bytes, trivial::TriviallyTransmutable};
 
 use solana_program::{
-    account_info::AccountInfo, clock::Clock, program_error::ProgramError, program_pack::Pack,
-    pubkey::Pubkey, rent::Rent, sysvar::Sysvar,
+    account_info::AccountInfo,
+    clock::Clock,
+    program::invoke_signed,
+    program_error::ProgramError,
+    program_pack::Pack,
+    pubkey::{self, Pubkey},
+    rent::Rent,
+    system_instruction, system_program,
+    sysvar::Sysvar,
 };
 use spl_token::error::TokenError;
 
@@ -41,6 +48,8 @@ use crate::{
     matching::{OrderBookState, OrderType, RequestProceeds, Side},
     volume_tracker::VolumeTracker,
 };
+
+use self::account_parser::SignerAccount;
 
 declare_check_assert_macros!(SourceFileId::State);
 
@@ -633,8 +642,8 @@ impl MarketState {
 #[repr(packed)]
 #[derive(Copy, Clone)]
 pub struct GlobalUserState {
-    pub account_flags: u64, // Initialized, GlobalUserState
-    pub owner: [u64; 4],
+    account_flags: u64, // Initialized, GlobalUserState
+    owner: [u64; 4],
     maker_volume: VolumeTracker,
     taker_volume: VolumeTracker,
     pub maker_fee_tier: FeeTier,
@@ -645,6 +654,20 @@ unsafe impl Pod for GlobalUserState {}
 unsafe impl Zeroable for GlobalUserState {}
 
 impl<'a> GlobalUserState {
+    pub fn get_pda_seeds(owner: &Pubkey) -> Vec<&[u8]> {
+        vec![owner.as_ref(), b"global_user_account"]
+    }
+    fn init(&mut self, owner: &[u64; 4]) -> DexResult {
+        check_assert_eq!(self.account_flags, 0)?;
+        let timestamp = Clock::get()?.unix_timestamp as u64;
+        self.account_flags = (AccountFlag::Initialized | AccountFlag::GlobalUserState).bits();
+        self.owner = *owner;
+        self.maker_volume = VolumeTracker::new(timestamp);
+        self.taker_volume = VolumeTracker::new(timestamp);
+        self.maker_fee_tier = FeeTier::Base;
+        self.taker_fee_tier = FeeTier::Base;
+        Ok(())
+    }
     fn check_flags(&self) -> DexResult {
         let flags = BitFlags::from_bits(self.account_flags)
             .map_err(|_| DexErrorCode::InvalidMarketFlags)?;
@@ -662,8 +685,8 @@ impl<'a> GlobalUserState {
         let global_user_state: RefMut<GlobalUserState> =
             RefMut::map(data, |data| from_bytes_mut(data));
         if global_user_state.account_flags == 0 {
-            // TODO: initialize account
-            todo!()
+            // This should only be used during testing, since the account should be initialized in `CreateGlobalUserAccount`
+            global_user_state.init(owner_pk)?;
         }
         global_user_state.check_flags()?;
         // Confirm that the expected owner owns the account
@@ -2630,6 +2653,8 @@ pub(crate) mod account_parser {
             f(args)
         }
     }
+
+    pub struct CreateGlobalUserAccountArgs {}
 }
 
 #[inline]
@@ -2753,6 +2778,9 @@ impl State {
                 limit,
                 Self::process_prune,
             )?,
+            MarketInstruction::CreateGlobalUserAccount => {
+                Self::process_create_global_user_account(program_id, accounts)?
+            }
         };
         Ok(())
     }
@@ -2760,6 +2788,70 @@ impl State {
     #[cfg(feature = "program")]
     fn process_send_take(_args: account_parser::SendTakeArgs) -> DexResult {
         unimplemented!()
+    }
+
+    fn process_create_global_user_account(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> DexResult {
+        // Parse accounts.
+        check_assert!(accounts.len() == 4)?;
+        let &[ref global_user_acc, ref owner_acc, ref payer_acc, ref system_program] =
+            array_ref![accounts, 0, 4];
+
+        // Dynamic sysvars don't work in unit tests.
+        // #[cfg(any(test, feature = "fuzz"))]
+        // let rent = Rent::from_account_info(rent_acc)?;
+        // #[cfg(not(any(test, feature = "fuzz")))]
+        let rent = Rent::get()?;
+
+        // Validate the accounts given are valid.
+        check_assert!(owner_acc.is_signer)?;
+        check_assert!(payer_acc.is_signer)?;
+        check_assert!(global_user_acc.is_signer)?;
+        check_assert!(global_user_acc.is_writable)?;
+        check_assert_eq!(system_program.key, system_program::ID);
+
+        // Find PDA address for authorized_buffer
+        // TODO: make function to get seeds
+        let mut seeds = GlobalUserState::get_pda_seeds(&owner_acc.key);
+
+        let (global_user_acc_key, bump_seed) =
+            Pubkey::find_program_address(seeds.as_slice(), program_id);
+
+        // Confirm that the PDA address we found matches the one passed into the program
+        check_assert_eq!(global_user_acc_key, *global_user_acc.key)?;
+
+        // Create the GlobalUserAccount
+        let bump_seed_bytes = [bump_seed];
+        seeds.push(&bump_seed_bytes);
+
+        let global_user_acc_size = std::mem::size_of::<GlobalUserState>();
+
+        invoke_signed(
+            &system_instruction::create_account(
+                payer_acc.key,
+                &global_user_acc_key,
+                Rent::get()?.minimum_balance(global_user_acc_size),
+                global_user_acc_size as u64,
+                program_id,
+            ),
+            &[
+                payer_acc.clone(),
+                global_user_acc.clone(),
+                system_program.clone(),
+            ],
+            &[seeds.as_slice()],
+        )?;
+
+        // Initialize GlobalUserAccount data
+        let mut global_user_acc_data = global_user_acc.try_borrow_mut_data()?;
+        let global_user_state: RefMut<GlobalUserState> =
+            RefMut::map(global_user_acc_data, |data| from_bytes_mut(data));
+
+        global_user_state.init(&owner_acc.key.to_aligned_bytes())?;
+
+        Ok(())
     }
 
     fn process_prune(args: account_parser::PruneArgs) -> DexResult {
@@ -3009,9 +3101,10 @@ impl State {
             // based on the owner's pubkey using `find_program_address`
             //  - maybe we should store the bump seed in the global account?
             let owner_wallet = &identity(open_orders.owner);
-            let seeds = [cast_slice(owner_wallet), "global_user_account".as_bytes()];
+            let seeds = GlobalUserState::get_pda_seeds(&Pubkey::from_aligned_bytes(*owner_wallet));
             // PDA is derived from the owner wallet address
-            let (global_user_key, bump) = Pubkey::find_program_address(&seeds, program_id);
+            let (global_user_key, bump) =
+                Pubkey::find_program_address(seeds.as_slice(), program_id);
 
             let mut global_user_state = if let Ok(global_user_index) = global_user_accounts
                 .binary_search_by_key(&global_user_key, |account_info| *account_info.key)

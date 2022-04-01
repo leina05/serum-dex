@@ -467,6 +467,11 @@ pub enum MarketInstruction {
     /// accounts.len() - 2 `[writable]` event queue
     /// accounts.len() - 1 `[signer]` crank authority
     ConsumeEventsPermissioned(u16),
+    /// 0. `[writable]` GlobalUserAccount (PDA)
+    /// 1. `[signer]` the GlobalUser owner
+    /// 2. `[signer]` the payer
+    /// 3. `[]` System Program
+    CreateGlobalUserAccount,
 }
 
 impl MarketInstruction {
