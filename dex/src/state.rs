@@ -682,7 +682,7 @@ impl<'a> GlobalUserState {
         owner_pk: &[u64; 4],
     ) -> DexResult<RefMut<'a, Self>> {
         let data = global_user_account.try_borrow_mut_data()?;
-        let global_user_state: RefMut<GlobalUserState> =
+        let mut global_user_state: RefMut<GlobalUserState> =
             RefMut::map(data, |data| from_bytes_mut(data));
         if global_user_state.account_flags == 0 {
             // This should only be used during testing, since the account should be initialized in `CreateGlobalUserAccount`
@@ -2155,6 +2155,11 @@ pub(crate) mod account_parser {
             // Should be an even number of user accounts, as there should be 1
             // open orders account and one global user account for each user
             check_assert!(user_accounts.len() % 2 == 0)?;
+            // TODO (leina): this requires one global user account to be provided for
+            // every open orders account. But it's possible that the same global
+            // user account could correspond to multiple open orders accounts.
+            // Update the instruction to take `num_open_orders` as ix data, so
+            // that redundant global user accounts need not be passed.
             let open_orders_accounts = &user_accounts[..user_accounts.len() / 2];
             let global_user_accounts = &user_accounts[user_accounts.len() / 2..];
             let market = Market::load(market_acc, program_id, true)?;
@@ -2810,7 +2815,7 @@ impl State {
         check_assert!(payer_acc.is_signer)?;
         check_assert!(global_user_acc.is_signer)?;
         check_assert!(global_user_acc.is_writable)?;
-        check_assert_eq!(system_program.key, system_program::ID);
+        check_assert_eq!(*system_program.key, system_program::ID);
 
         // Find PDA address for authorized_buffer
         // TODO: make function to get seeds
@@ -2845,8 +2850,8 @@ impl State {
         )?;
 
         // Initialize GlobalUserAccount data
-        let mut global_user_acc_data = global_user_acc.try_borrow_mut_data()?;
-        let global_user_state: RefMut<GlobalUserState> =
+        let global_user_acc_data = global_user_acc.try_borrow_mut_data()?;
+        let mut global_user_state: RefMut<GlobalUserState> =
             RefMut::map(global_user_acc_data, |data| from_bytes_mut(data));
 
         global_user_state.init(&owner_acc.key.to_aligned_bytes())?;
@@ -3100,8 +3105,9 @@ impl State {
             // Global user accounts should be PDAs, so they can be looked up
             // based on the owner's pubkey using `find_program_address`
             //  - maybe we should store the bump seed in the global account?
-            let owner_wallet = &identity(open_orders.owner);
-            let seeds = GlobalUserState::get_pda_seeds(&Pubkey::from_aligned_bytes(*owner_wallet));
+            let owner_wallet_aligned_bytes = identity(open_orders.owner);
+            let owner_wallet_pk = Pubkey::from_aligned_bytes(owner_wallet_aligned_bytes);
+            let seeds = GlobalUserState::get_pda_seeds(&owner_wallet_pk);
             // PDA is derived from the owner wallet address
             let (global_user_key, bump) =
                 Pubkey::find_program_address(seeds.as_slice(), program_id);
@@ -3109,7 +3115,10 @@ impl State {
             let mut global_user_state = if let Ok(global_user_index) = global_user_accounts
                 .binary_search_by_key(&global_user_key, |account_info| *account_info.key)
             {
-                GlobalUserState::load(&global_user_accounts[global_user_index], owner_wallet)?
+                GlobalUserState::load(
+                    &global_user_accounts[global_user_index],
+                    &owner_wallet_aligned_bytes,
+                )?
             } else {
                 return Err(DexErrorCode::GlobalUserAccountNotProvided.into());
             };

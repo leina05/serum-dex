@@ -12,6 +12,7 @@ mod fees;
 mod fractional;
 pub mod instruction;
 pub mod matching;
+mod price_accounts;
 pub mod state;
 mod volume_tracker;
 

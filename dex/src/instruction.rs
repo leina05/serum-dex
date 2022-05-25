@@ -353,10 +353,13 @@ pub enum MarketInstruction {
     /// 4. `[writable]` asks
     MatchOrders(u16),
     /// ... `[writable]` OpenOrders
-    /// accounts.len() - 4 `[writable]` market
-    /// accounts.len() - 3 `[writable]` event queue
-    /// accounts.len() - 2 `[]`
-    /// accounts.len() - 1 `[]`
+    /// ... `[writable]` GlobalUserAccounts
+    /// accounts.len() - 6 `[writable]` market
+    /// accounts.len() - 5 `[writable]` event queue
+    /// accounts.len() - 4 `[]` coin Pyth price account
+    /// accounts.len() - 3 `[]` pc Pyth price account
+    /// accounts.len() - 2 `[]` coin mint
+    /// accounts.len() - 1 `[]` pc mint
     ConsumeEvents(u16),
     /// 0. `[]` market
     /// 1. `[writable]` OpenOrders
@@ -573,6 +576,7 @@ impl MarketInstruction {
                 let limit = array_ref![data, 0, 2];
                 MarketInstruction::ConsumeEventsPermissioned(u16::from_le_bytes(*limit))
             }
+            (18, 0) => MarketInstruction::CreateGlobalUserAccount,
             _ => return None,
         })
     }

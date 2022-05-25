@@ -3,6 +3,11 @@ use std::mem::size_of;
 use std::num::NonZeroU64;
 
 use bumpalo::{collections::Vec as BumpVec, vec as bump_vec, Bump};
+use pyth_client::CorpAction;
+use pyth_client::Price;
+use pyth_client::PriceConf;
+use pyth_client::PriceInfo;
+use pyth_client::PriceStatus;
 use rand::prelude::*;
 use safe_transmute::to_bytes::{transmute_to_bytes, transmute_to_bytes_mut};
 use solana_program::account_info::AccountInfo;
@@ -20,6 +25,8 @@ use instruction::{initialize_market, MarketInstruction, NewOrderInstructionV3, S
 use matching::{OrderType, Side};
 use state::gen_vault_signer_key;
 use state::{Market, MarketState, OpenOrders, State, ToAlignedBytes};
+
+use crate::state::GlobalUserState;
 
 use super::*;
 
@@ -163,6 +170,37 @@ fn new_spl_token_program<'bump>(bump: &'bump Bump) -> AccountInfo<'bump> {
     )
 }
 
+fn new_pyth_price_account<'bump, Gen: Rng>(
+    rng: &mut Gen,
+    bump: &'bump Bump,
+    price: i64,
+    expo: i32,
+) -> AccountInfo<'bump> {
+    let data = bump_vec![in bump; 0u8; std::mem::size_of::<Price>()].into_bump_slice_mut();
+    let mut price_account = Price::default();
+    price_account.agg = PriceInfo {
+        price,
+        conf: 0,
+        status: PriceStatus::Trading,
+        corp_act: CorpAction::NoCorpAct,
+        pub_slot: 0,
+    };
+    price_account.expo = expo;
+    let price_bytes = bytemuck::bytes_of::<Price>(&price_account);
+    data.copy_from_slice(price_bytes);
+
+    AccountInfo::new(
+        random_pubkey(rng, bump),
+        false,
+        true,
+        bump.alloc(60_000_000_000),
+        data,
+        &pyth_client::ID,
+        false,
+        Epoch::default(),
+    )
+}
+
 fn setup_market<'bump, R: Rng>(rng: &mut R, bump: &'bump Bump) -> MarketAccounts<'bump> {
     let program_id = random_pubkey(rng, bump);
     let market = new_dex_owned_account(rng, size_of::<MarketState>(), program_id, bump);
@@ -263,6 +301,18 @@ fn test_new_order() {
     let dex_program_id = accounts.market.owner;
 
     let owner = new_sol_account(&mut rng, 1_000_000_000, &bump);
+    let (global_account_key, bump_seed) = Pubkey::find_program_address(
+        GlobalUserState::get_pda_seeds(&owner.key).as_slice(),
+        dex_program_id,
+    );
+    let mut global_account = new_dex_owned_account(
+        &mut rng,
+        size_of::<GlobalUserState>(),
+        dex_program_id,
+        &bump,
+    );
+    global_account.key = &global_account_key;
+    let price_account = new_pyth_price_account(&mut rng, &bump, 1, 0);
     let orders_account_buyer =
         new_dex_owned_account(&mut rng, size_of::<OpenOrders>(), dex_program_id, &bump);
     let orders_account_seller =
@@ -368,8 +418,13 @@ fn test_new_order() {
         let crank_accounts = bump_vec![in &bump;
             orders_account_buyer.clone(),
             orders_account_seller.clone(),
+            // FIXME: The owner is the same for buyer and seller, so the global_account is also the same
+            global_account.clone(),
+            global_account.clone(),
             accounts.market.clone(),
             accounts.event_q.clone(),
+            price_account.clone(),
+            price_account.clone(),
             coin_account.clone(),
             pc_account.clone(),
         ]
